@@ -1,0 +1,364 @@
+C51 COMPILER V9.01   1                                                                     10/10/2017 17:02:33 PAGE 1   
+
+
+C51 COMPILER V9.01, COMPILATION OF MODULE 1
+OBJECT MODULE PLACED IN 1.OBJ
+COMPILER INVOKED BY: F:\工具软件\KEIL\C51\BIN\C51.EXE 1.c BROWSE DEBUG OBJECTEXTEND
+
+line level    source
+
+   1          /*z地址定义
+   2          50 1=x+，2=x-，3=y+,4=y-
+   3          51 前进后退步数高
+   4          52 前进后退步数低
+   5          53 
+   6          54/55 字宽 
+   7          56 
+   8          57 弱光开关
+   9          58/59 激光强度
+  10          60 x轴速度
+  11          61 y轴速度
+  12          62 开始打印0,57
+  13          63 暂停
+  14          64 停止标志
+  15          65
+  16          66  左右标记 
+  17          100开始时灰度图数据
+  18          */
+  19          
+  20          #include <reg52.h>
+  21          #define uint unsigned int 
+  22          #define uchar unsigned char 
+  23          #define N z[60]    //X速度
+  24          #define M z[61]    //Y速度
+  25          sbit a=P1^0;//步进电机接线定义
+  26          sbit a_=P1^1;
+  27          sbit b=P1^2;
+  28          sbit b_=P1^3;      //纵向电机驱动
+  29          
+  30          sbit xa=P2^0;
+  31          sbit xa_=P2^1;  
+  32          sbit xb=P2^2;
+  33          sbit xb_=P2^3;   //横向电机驱动
+  34          
+  35          sbit jg=P3^7;   //激光接线
+  36          sbit led=P3^6;//指示灯
+  37          
+  38          uchar xdata z[500]={0};//缓存
+  39          uchar buff[3];//串口缓存
+  40          uchar x1,x0,y1,y0,cont2=0;
+  41          uchar xfb=4,yfb=4;//走步标志位
+  42          
+  43          
+  44          unsigned char HighRH = 0;  //高电平重载值的高字节
+  45          unsigned char HighRL = 0;  //高电平重载值的低字节
+  46          unsigned char LowRH  = 0;  //低电平重载值的高字节
+  47          unsigned char LowRL  = 0;  //低电平重载值的低字节
+  48          
+  49          
+  50          
+  51          void delayms(uint xms)                          
+  52          {   
+  53   1              uint i,j;
+  54   1              for(i=xms;i>0;i--)                    //i=xms即延时约xms毫秒
+  55   1                      for(j=110;j>0;j--);
+C51 COMPILER V9.01   1                                                                     10/10/2017 17:02:33 PAGE 2   
+
+  56   1      }
+  57          
+  58          /* 配置并启动PWM，fr-频率，dc-占空比 */
+  59          void ConfigPWM(unsigned int fr, unsigned char dc)
+  60          {
+  61   1          unsigned int  high, low;
+  62   1          unsigned long tmp;
+  63   1          
+  64   1          tmp  = (11059200/12) / fr;  //计算一个周期所需的计数值
+  65   1          high = (tmp*dc) / 100;      //计算高电平所需的计数值
+  66   1          low  = tmp - high;          //计算低电平所需的计数值
+  67   1          high = 65536 - high + 12;   //计算高电平的重载值并补偿中断延时
+  68   1          low  = 65536 - low  + 12;   //计算低电平的重载值并补偿中断延时
+  69   1          HighRH = (unsigned char)(high>>8); //高电平重载值拆分为高低字节
+  70   1          HighRL = (unsigned char)high;
+  71   1          LowRH  = (unsigned char)(low>>8);  //低电平重载值拆分为高低字节
+  72   1          LowRL  = (unsigned char)low;
+  73   1          TMOD &= 0xF0;   //清零T0的控制位
+  74   1          TMOD |= 0x01;   //配置T0为模式1
+  75   1          TH0 = HighRH;   //加载T0重载值
+  76   1          TL0 = HighRL;
+  77   1          ET0 = 1;        //使能T0中断
+  78   1          TR0 = 1;        //启动T0
+  79   1          jg = 0;     //输出低电平，关闭激光
+  80   1      }
+  81          /* 关闭PWM */
+  82          void ClosePWM()
+  83          {
+  84   1          TR0 = 0;     //停止定时器0
+  85   1          ET0 = 0;     //禁止定时器0中断
+  86   1          jg = 0;  //输出低电平，关闭激光
+  87   1      }
+  88          /* T0中断服务函数，产生PWM输出 */
+  89          void InterruptTimer0() interrupt 1
+  90          {
+  91   1          if (jg == 0)  //当前输出为低电平时，装载高电平值并输出高电平
+  92   1          {
+  93   2              TH0 = LowRH;
+  94   2              TL0 = LowRL;
+  95   2              jg = 1;
+  96   2          }
+  97   1          else              //当前输出为高电平时，装载低电平值并输出低电平
+  98   1          {
+  99   2              TH0 = HighRH;
+ 100   2              TL0 = HighRL;
+ 101   2              jg = 0;
+ 102   2          }
+ 103   1      }
+ 104          
+ 105          
+ 106          
+ 107          void xfor(uint i)               //x轴前进函数，前进多少步
+ 108          {   
+ 109   1        while(1) 
+ 110   1        {
+ 111   2                      if(xfb==4)
+ 112   2                        {
+ 113   3               xa=xb=1;
+ 114   3                     xb_=xa_=0;
+ 115   3                           xfb=1;
+ 116   3                           i--;                       
+ 117   3                     delayms(N);
+C51 COMPILER V9.01   1                                                                     10/10/2017 17:02:33 PAGE 3   
+
+ 118   3                           if(i==0){xa=xb=0; break;}
+ 119   3                        }
+ 120   2                         if(xfb==1)
+ 121   2                        {
+ 122   3               xb=xa_=1;
+ 123   3                     xa=xb_=0;
+ 124   3                           xfb=2;
+ 125   3                           i--;       
+ 126   3                     delayms(N);
+ 127   3                           if(i==0){xa_=xb=0; break;}
+ 128   3                        }
+ 129   2                         if(xfb==2)
+ 130   2                        {
+ 131   3               xa_=xb_=1;
+ 132   3               xb=xa=0;
+ 133   3                           xfb=3;     //走步标志位
+ 134   3                           i--;
+ 135   3                     delayms(N);
+ 136   3                           if(i==0){xa_=xb_=0; break;}
+ 137   3                         }
+ 138   2                         if(xfb==3)
+ 139   2                        {
+ 140   3               xa_=xb=0;
+ 141   3                     xb_=xa=1;
+ 142   3                           xfb=4;
+ 143   3                           i--;       
+ 144   3                     delayms(N);
+ 145   3                           if(i==0){xa=xb_=0; break;}
+ 146   3                        }
+ 147   2      
+ 148   2      
+ 149   2                      }
+ 150   1      
+ 151   1      }
+ 152          
+ 153          
+ 154          void xbac(uint i)               //xxx后退函数
+ 155          {   
+ 156   1           while(1) 
+ 157   1               {
+ 158   2                      if(xfb==1)
+ 159   2                        {
+ 160   3               xa_=xb=0;
+ 161   3                     xb_=xa=1;
+ 162   3                           xfb=4;
+ 163   3                           i--;                               //走步标志位
+ 164   3                     delayms(N);
+ 165   3                           if(i==0){xa=xb_=0; break;}
+ 166   3                         }
+ 167   2                         if(xfb==4)
+ 168   2                        {
+ 169   3               xa_=xb_=1;
+ 170   3               xb=xa=0;
+ 171   3                           xfb=3;
+ 172   3                           i--;       
+ 173   3                     delayms(N);
+ 174   3                           if(i==0){xa_=xb_=0; break;}
+ 175   3                         }
+ 176   2                         if(xfb==3)
+ 177   2                        {
+ 178   3               xb=xa_=1;
+ 179   3                     xa=xb_=0;
+C51 COMPILER V9.01   1                                                                     10/10/2017 17:02:33 PAGE 4   
+
+ 180   3                           xfb=2;     //走步标志位
+ 181   3                           i--;       
+ 182   3                     delayms(N);
+ 183   3                           if(i==0){xa_=xb=0; break;}
+ 184   3                         }
+ 185   2                         if(xfb==2)
+ 186   2                        {
+ 187   3               xa=xb=1;
+ 188   3                     xb_=xa_=0;
+ 189   3                           xfb=1;
+ 190   3                           i--;       
+ 191   3                     delayms(N);
+ 192   3                           if(i==0){xa=xb=0; break;}
+ 193   3                        }
+ 194   2                      }
+ 195   1      }
+ 196          
+ 197          
+ 198          
+ 199          void yfor(uint i)               //y轴前进函数
+ 200          {   
+ 201   1           while(1) 
+ 202   1           {
+ 203   2                     switch(yfb)
+ 204   2                         {
+ 205   3                           case 4:{a=b=1; b_=a_=0; yfb=1; i--; delayms(M); if(i==0){a=b=0;break;}}
+ 206   3                                       case 1:{b=a_=1; a=b_=0; yfb=2; i--; delayms(M); if(i==0){a_=b=0;break;}}
+ 207   3                                       case 2:{a_=b_=1; b=a=0; yfb=3; i--; delayms(M); if(i==0){a_=b_=0;break;}}
+ 208   3                                       case 3:{b_=a=1; a_=b=0; yfb=4; i--; delayms(M); if(i==0){a=b_=0;break;}}
+ 209   3                         }
+ 210   2                         if(i==0)  break;
+ 211   2            }
+ 212   1      }
+ 213          
+ 214          void ybac(uint i)               //yy后退函数
+ 215          {   
+ 216   1           while(1) 
+ 217   1           {
+ 218   2                     switch(yfb)
+ 219   2                         {
+ 220   3                           case 1:{a=b_=1; b=a_=0; yfb=4; i--; delayms(M); if(i==0){a=b_=0;break;}}
+ 221   3                                       case 4:{b_=a_=1; a=b=0; yfb=3; i--; delayms(M); if(i==0){a_=b_=0;break;}}
+ 222   3                                       case 3:{a_=b=1; b_=a=0; yfb=2; i--; delayms(M); if(i==0){a_=b=0;break;}}
+ 223   3                                       case 2:{b=a=1; a_=b_=0; yfb=1; i--; delayms(M); if(i==0){a=b=0;break;}}
+ 224   3                         }
+ 225   2                         if(i==0)  break;
+ 226   2            }
+ 227   1      }
+ 228          
+ 229          void dazi(uint zik)//打印函数              ******打印函数已更改******
+ 230          {
+ 231   1          uint x;
+ 232   1                      jg=0;
+ 233   1       
+ 234   1                              for(x=0;x<zik;x++)//执行zik个循环，x轴右移zik步
+ 235   1                              {
+ 236   2                                while(z[63]);//暂停等待
+ 237   2                                      if(z[64]==1) break;//停止标志 跳出循环
+ 238   2                                      jg=1;//开激光
+ 239   2                                      delayms((z[99+x]*(z[58]*256+z[59]))/100);
+ 240   2                                  jg=0;  //关闭激光
+ 241   2                              if(z[66]==1)
+C51 COMPILER V9.01   1                                                                     10/10/2017 17:02:33 PAGE 5   
+
+ 242   2                              {
+ 243   3                              xbac(1);
+ 244   3                              }       
+ 245   2                   else
+ 246   2                               {
+ 247   3                               xfor(1);
+ 248   3                               }                       
+ 249   2                              }         
+ 250   1                      if(z[64==1])    z[64]=0;
+ 251   1                  else{yfor(1);} //y轴进一行
+ 252   1              z[62]=0;//一行打印完成
+ 253   1                      SBUF=1;//发送信息，表示打印完成 
+ 254   1                      
+ 255   1      }
+ 256          
+ 257           /* 串口配置函数，baud-通信波特率 */
+ 258          void ConfigUART(unsigned int baud)
+ 259          {
+ 260   1          SCON  = 0x50;  //配置串口为模式1
+ 261   1          TMOD &= 0x0F;  //清零T1的控制位
+ 262   1          TMOD |= 0x20;  //配置T1为模式2
+ 263   1          TH1 = 256 - (11059200/12/32)/baud;  //计算T1重载值
+ 264   1          TL1 = TH1;     //初值等于重载值
+ 265   1          ET1 = 0;       //禁止T1中断
+ 266   1          ES  = 1;       //使能串口中断
+ 267   1          TR1 = 1;       //启动T1
+ 268   1      }
+ 269          
+ 270          
+ 271          void chuanlo() interrupt 4
+ 272          {
+ 273   1        if(RI)
+ 274   1        {
+ 275   2           buff[cont2]=SBUF;//每次3字节，地址高，地址低，数据，，
+ 276   2          
+ 277   2                 cont2++;
+ 278   2           if(cont2==3)//每收3个字节，把数据写入地址中
+ 279   2                 {
+ 280   3                  z[(buff[0]*256)+buff[1]]=buff[2];
+ 281   3                        cont2=0;
+ 282   3                       SBUF=0;  //*****************在这里加入这行代码测试一下*******************************
+ 283   3                 }
+ 284   2               RI=0;
+ 285   2      
+ 286   2      
+ 287   2          
+ 288   2        }
+ 289   1        if(TI)
+ 290   1         {
+ 291   2         TI=0;
+ 292   2      
+ 293   2         }
+ 294   1      }
+ 295          
+ 296          main()
+ 297          {  
+ 298   1         EA=1;
+ 299   1         P0=0xff;
+ 300   1         ConfigUART(9600)     ;
+ 301   1              z[60]=15;//默认的参数
+ 302   1              z[61]=15;
+ 303   1              z[56]=1;
+C51 COMPILER V9.01   1                                                                     10/10/2017 17:02:33 PAGE 6   
+
+ 304   1              z[62]=0;
+ 305   1              jg=0;
+ 306   1              cont2=0;
+ 307   1              
+ 308   1         while(1)
+ 309   1         {
+ 310   2                                                                                                                         //   *****此处已更改******
+ 311   2      
+ 312   2          if(z[57]==100){ConfigPWM(100, 98);delayms(10);}      //上位机指令处理，打开弱光定位，频率100Hz，占空比98% 
+             -                                                                     
+ 313   2          else if(z[57]==1)   jg=1;                                             //打开强光
+ 314   2              else   { ClosePWM(); delayms(10);}
+ 315   2               
+ 316   2                if(cont2!=0) led=0;  else led=1;//指示通信是否可用
+ 317   2            if(z[50]==1){xfor(z[51]*256+z[52]);z[50]=0;}//x+
+ 318   2                if(z[50]==2){xbac(z[51]*256+z[52]);z[50]=0;}//x-
+ 319   2                if(z[50]==3){yfor(z[51]*256+z[52]);z[50]=0;}//y+
+ 320   2                if(z[50]==4){ybac(z[51]*256+z[52]);z[50]=0;}//y-
+ 321   2      
+ 322   2                
+ 323   2            if(z[62])//开始打印标志
+ 324   2                {
+ 325   3                  dazi(z[54]*256+z[55]);
+ 326   3                }
+ 327   2         
+ 328   2        }
+ 329   1      
+ 330   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1267    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =    500    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     14       9
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
